@@ -1,0 +1,8 @@
+# local environment: copy config.example.json to config.json and fill it in
+config.json
+.plex-badge.json
+
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

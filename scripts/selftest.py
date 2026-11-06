@@ -40,7 +40,7 @@ def test_badge_rule():
 
 def test_paths():
     check('smb -> volume1',
-          pc.smb_to_plex('\\\\192.168.100.221\\Plex\\Movies\\a.mp4'),
+          pc.smb_to_plex('\\\\nas-server\\Plex\\Movies\\a.mp4'),
           '/volume1/Plex/Movies/a.mp4')
     check('posix passthrough', pc.smb_to_plex('/volume1/x/a.mp4'),
           '/volume1/x/a.mp4')

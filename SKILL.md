@@ -22,7 +22,7 @@ agent_created: true
 
 ```powershell
 # 路径按本机实际 skill 目录调整
-python C:\Users\SAYA\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_refresh.py all --apply
+python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_refresh.py" all --apply
 ```
 
 默认读 `config.json` 里的 `list_file`，只处理**文件名带角标后缀**的条目（`-C` `-U` `-UC` `-LTX` …）。
@@ -52,24 +52,24 @@ python C:\Users\SAYA\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_ref
 先小样本试跑，确认无误再全量：
 
 ```powershell
-$S = "C:\Users\SAYA\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_refresh.py"
+$S = "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_refresh.py"
 python $S all --apply --limit 2      # 先 2 条
 python $S all --apply                # 再全量
 ```
 
 ## 配置
 
-`~/.workbuddy/skills/plex-badge-refresh/config.json`（已按当前 NAS 填好）：
+`~/.workbuddy/skills/plex-badge-refresh/config.json`（下面都是占位值，装完按实际环境填）：
 
 ```json
 {
-  "plex_url": "http://192.168.100.221:32400",
-  "prefs_path": "//192.168.100.221/Plex/.../Preferences.xml",
-  "plugin_log": "//192.168.100.221/Plex/.../PMS Plugin Logs/com.plexapp.agents.metatube.log",
+  "plex_url": "http://<plex-host>:32400",
+  "prefs_path": "//<plex-host>/Plex/.../Preferences.xml",
+  "plugin_log": "//<plex-host>/Plex/.../PMS Plugin Logs/com.plexapp.agents.metatube.log",
   "agent": "com.plexapp.agents.metatube",
   "sections": [],
   "share_root": "/volume1",
-  "list_file": "C:\\Users\\SAYA\\Desktop\\最近一个月视频列表.txt"
+  "list_file": "C:\\Users\\<用户名>\\Desktop\\最近一个月视频列表.txt"
 }
 ```
 
@@ -90,7 +90,7 @@ python $S all --apply                # 再全量
 
 - 安装的是**打过日志补丁的 MetaTube.bundle**（`update()` 里会 `Log.Debug('Poster submitted for ...')`）。上游原版没有这行，脚本会提示 `no "Poster submitted" line`。
 - `Logs/PMS Plugin Logs/com.plexapp.agents.metatube.log` 可读（SMB 即可，插件日志级别要是 Debug 或更高）。
-- 清单里的路径是 NAS 上的原始路径（`\\192.168.100.221\Plex\...`），脚本会按 `share_root` 换成 Plex 视角的 `/volume1/...`；换不出来时退回按文件名匹配。
+- 清单里的路径是 NAS 上的原始路径（`\\<plex-host>\Plex\...`），脚本会按 `share_root` 换成 Plex 视角的 `/volume1/...`；换不出来时退回按文件名匹配。
 
 ## 结果状态怎么读
 
@@ -108,7 +108,7 @@ python $S all --apply                # 再全量
 
 ```bash
 # 看最近插件日志
-tail -40 "//192.168.100.221/Plex/Library/Application Support/Plex Media Server/Logs/PMS Plugin Logs/com.plexapp.agents.metatube.log"
+tail -40 "//<plex-host>/Plex/Library/Application Support/Plex Media Server/Logs/PMS Plugin Logs/com.plexapp.agents.metatube.log"
 ```
 
 - 整批 `no update`：插件没加载。查日志有没有 `SyntaxError` / `Exception starting plug-in`（Plex 的 RestrictedPython 禁止以下划线开头的标识符）。
@@ -118,7 +118,7 @@ tail -40 "//192.168.100.221/Plex/Library/Application Support/Plex Media Server/L
 ## 改代码之后
 
 ```powershell
-python C:\Users\SAYA\.workbuddy\skills\plex-badge-refresh\scripts\selftest.py
+python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\selftest.py"
 ```
 
 离线自测（不碰 Plex、不碰 NAS），覆盖角标正则、路径换算、日志解析（含轮转优先级）、刷新跟踪的超时与完成判定。20 项全绿再上真机。

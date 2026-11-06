@@ -36,7 +36,7 @@
 ```text
 帮我把 plex-badge-refresh 安装成 WorkBuddy skill。
 
-仓库：https://github.com/sayaxia/plex-badge-refresh（private，需要 GitHub 授权）
+仓库：https://github.com/sayaxia/plex-badge-refresh（public，直接 clone 即可）
 
 步骤：
 1. clone 到 ~/.workbuddy/skills/plex-badge-refresh

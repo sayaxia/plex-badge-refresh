@@ -29,9 +29,23 @@
 
 ## 安装
 
-### 方式一：让 agent 装（推荐）
+### 一句话装（推荐）
 
-在 WorkBuddy 里新建对话，把下面这段**整段**发给它：
+在 WorkBuddy 里新建对话，发这两行：
+
+```text
+安装 skill：https://github.com/sayaxia/plex-badge-refresh
+装到 ~/.workbuddy/skills/plex-badge-refresh，config.json 缺的参数问我。
+```
+
+能一句话搞定，是因为仓库把该给的信息都给全了：public 可匿名 clone、根目录有 `SKILL.md`（frontmatter 里写了 `name` 和 `description`，agent 读完就知道什么时候触发）、`config.example.json` 带完整默认值。剩下只有 Plex 地址这类**只有你知道**的东西，所以提示词里写一句「缺的参数问我」就够了，不需要把步骤列出来。
+
+装完**新开一次对话**，说「刷新元数据，把封面换成新合成的海报」即可。
+
+### 完整版（想装完立刻能验收时用）
+
+<details>
+<summary>展开：带验收步骤和约束的完整提示词</summary>
 
 ```text
 帮我把 plex-badge-refresh 安装成 WorkBuddy skill。
@@ -62,9 +76,11 @@
 - 装完提醒我：新装的 skill 要**新开一次对话**才会出现在可调用列表里。
 ```
 
-装完就可以直接说「刷新元数据，把封面换成新合成的海报」。
+适合这几种情况：跨机器迁移、想让 agent 顺手把 `selftest` 和 `scan` 都跑完再交付、或者 agent 手上没有 Git 授权。
 
-### 方式二：手动装
+</details>
+
+### 手动装
 
 ```bash
 git clone https://github.com/sayaxia/plex-badge-refresh.git \

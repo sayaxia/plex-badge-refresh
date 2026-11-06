@@ -29,11 +29,49 @@
 
 ## 安装
 
+### 方式一：让 agent 装（推荐）
+
+在 WorkBuddy 里新建对话，把下面这段**整段**发给它：
+
+```text
+帮我把 plex-badge-refresh 安装成 WorkBuddy skill。
+
+仓库：https://github.com/sayaxia/plex-badge-refresh（private，需要 GitHub 授权）
+
+步骤：
+1. clone 到 ~/.workbuddy/skills/plex-badge-refresh
+   Windows 上是 C:\Users\<用户名>\.workbuddy\skills\plex-badge-refresh
+   如果目录已存在，先告诉我要覆盖还是保留，不要直接删。
+2. 把 config.example.json 复制成 config.json（config.json 被 .gitignore 排除，只在本地存在）：
+   Windows: copy config.example.json config.json
+   macOS/Linux: cp config.example.json config.json
+3. 按我给的信息填 config.json 的这几项，其余留空用默认推导：
+   - plex_url     Plex 地址，例如 http://192.168.1.10:32400
+   - prefs_path   Plex 的 Preferences.xml（SMB 路径或本地路径）
+   - plugin_log   插件日志 .../Logs/PMS Plugin Logs/com.plexapp.agents.metatube.log
+   - list_file    视频清单 txt 的绝对路径（可先留空，用 --item / --recent 也行）
+   我还没给的话，先问我要，不要猜。
+4. 验证：
+   python scripts/selftest.py                         # 必须 20/20 通过
+   python scripts/plex_badge_refresh.py scan --limit 3   # 必须能列出条目
+5. 把 config.json 的最终内容（token 之类的敏感值可以打码）和上面两条命令的输出贴给我。
+
+约束：
+- 不要 git add / commit / push config.json，里面有内网地址。
+- 不要改 scripts/ 下的代码，先按原样跑通。
+- 装完提醒我：新装的 skill 要**新开一次对话**才会出现在可调用列表里。
+```
+
+装完就可以直接说「刷新元数据，把封面换成新合成的海报」。
+
+### 方式二：手动装
+
 ```bash
-git clone <this-repo> ~/.workbuddy/skills/plex-badge-refresh
+git clone https://github.com/sayaxia/plex-badge-refresh.git \
+          ~/.workbuddy/skills/plex-badge-refresh
 cp ~/.workbuddy/skills/plex-badge-refresh/config.example.json \
    ~/.workbuddy/skills/plex-badge-refresh/config.json
-# 编辑 config.json
+# 编辑 config.json：至少填 plex_url，其余可留空自动推导
 ```
 
 只想当命令行工具用的话，clone 到任意目录也一样，加 `--config` 指过去即可。

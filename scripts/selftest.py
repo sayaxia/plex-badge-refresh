@@ -36,6 +36,11 @@ def test_badge_rule():
     check('tag __restored', pc.tag_of('ABP-321__restored'), 'RESTORED')
     check('tag -restored', pc.tag_of('ABP-321-restored'), 'RESTORED')
     check('tag _LTX__restored', pc.tag_of('ABP-321_LTX__restored'), 'RESTORED')
+    check('tag _restored_wm', pc.tag_of('JUR-110_restored_wm'), 'RESTORED')
+    check('tag .LTX_wm', pc.tag_of('SONE-521_restored.LTX_wm'), 'LTX')
+    check('tag MISM _restored_wm',
+          pc.tag_of('MISM-399_restored_wm'), 'RESTORED')
+    check('wm alone is not a badge', pc.tag_of('ABP-321_wm'), None)
     check('no separator -> none', pc.tag_of('FSDSS983C'), None)
     check('plain', pc.tag_of('JUR-891'), None)
     check('expect UC', pc.expect_for('UC'), ('uc.png',))

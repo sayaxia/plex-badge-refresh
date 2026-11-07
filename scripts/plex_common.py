@@ -36,8 +36,18 @@ DEFAULTS = {
 # The plug-in decides a badge from the file stem: the token has to follow a
 # separator, otherwise "FSDSS983C" is just part of the code. Keep this rule
 # identical to utils.py, or we would refresh files the agent cannot see.
+#
+# Restoration tools may stack tool marks after the badge token ("_wm" for a
+# watermarked encode, ".LTX" for the model), so the badge need not be the
+# last token. WM alone is not a badge. See utils.TRAILING_BADGE_TAG.
+_BADGE_TOKEN = (r'(UNCENSORED|UC|C|CH|U|LTX|RESTORED|'
+                r'BASICVSR\+\+|BASICVSR)')
+_TOOL_TOKEN = (r'(?:WM|UNCENSORED|UC|C|CH|U|LTX|RESTORED|'
+               r'BASICVSR\+\+|BASICVSR)')
+# Capture the LAST badge token in the chain (see utils.TRAILING_BADGE_TAG).
 TAG_RE = re.compile(
-    r'[-_\s]+(UNCENSORED|UC|C|CH|U|LTX|RESTORED|BASICVSR\+\+|BASICVSR)$',
+    r'[-_.\s]+(?:' + _TOOL_TOKEN + r'[-_.\s]+)*' + _BADGE_TOKEN +
+    r'(?:[-_.\s]+' + _TOOL_TOKEN + r')*$',
     re.IGNORECASE)
 
 VIDEO_EXT = ('.mp4', '.mkv', '.avi', '.wmv', '.mov', '.m4v', '.ts', '.iso',

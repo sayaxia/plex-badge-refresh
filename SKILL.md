@@ -1,6 +1,6 @@
 ---
 name: plex-badge-refresh
-description: 刷新 Plex 中 MetaTube 刮削条目的元数据，并把重新合成的角标海报设为封面。当用户说「刷新元数据」「重新刮削」「重刮一下」「封面没更新」「海报还是旧的」「把新合成海报设成封面」「角标不对」「-C -U -UC -LTX __restored -BasicVSR++ 的视频批量处理」并涉及 Plex / MetaTube 时使用。也用于核对某批视频的封面角标是否与文件名后缀一致。
+description: 刷新 Plex 中 MetaTube 刮削条目的元数据，并把重新合成的角标海报设为封面。当用户说「刷新元数据」「重新刮削」「重刮一下」「封面没更新」「海报还是旧的」「把新合成海报设成封面」「角标不对」「-C -U -UC -LTX __restored -BasicVSR++ _restored_wm 的视频批量处理」并涉及 Plex / MetaTube 时使用。也用于核对某批视频的封面角标是否与文件名后缀一致。
 agent_created: true
 ---
 
@@ -30,7 +30,9 @@ python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge
 默认读 `config.json` 里的 `list_file`，只处理**文件名带角标后缀**的条目：`-C` / `-CH`（中文字幕）、
 `-U` / `-UNCENSORED` / `-LTX` / `_LTX` / `__restored` / `-BasicVSR++`（**都是无码破解**，统一 `u.png`，
 带中文字幕则 `uc.png`）、`-UC`（中文无码）。这些无码后缀只是同一版别的不同拼写，
-`BADGE_EXPECT` 对它们的期望值完全相同。
+`BADGE_EXPECT` 对它们的期望值完全相同。角标后面允许再叠工具标记（`_wm` 水印版、`.LTX` 点号分隔），
+如 `JUR-110_restored_wm.mp4`、`SONE-521_restored.LTX_wm.mp4` 照样识别；`wm` 单独出现不算角标。
+分隔符 `-` / `_` / `.` / 空格均可，连续重复也认。
 `--apply` 是安全闸：不加就只打印计划。
 
 ## 命令
@@ -153,4 +155,4 @@ tail -40 "//<plex-host>/Plex/Library/Application Support/Plex Media Server/Logs/
 python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\selftest.py"
 ```
 
-离线自测（不碰 Plex、不碰 NAS），覆盖角标正则（含 `_LTX` / `__restored` / `-BasicVSR++` 归为无码破解、`FSDSS983C` 不算角标的负例）、路径换算、日志解析（含轮转优先级）、刷新跟踪的超时与完成判定、上游 provider 清单解析与差异判定。56 项全绿再上真机。
+离线自测（不碰 Plex、不碰 NAS），覆盖角标正则（含 `_LTX` / `__restored` / `-BasicVSR++` 归为无码破解、`_restored_wm` / `.LTX_wm` 叠加工具标记、`FSDSS983C` 与 `_wm` 单独出现不算角标的负例）、路径换算、日志解析（含轮转优先级）、刷新跟踪的超时与完成判定、上游 provider 清单解析与差异判定。60 项全绿再上真机。

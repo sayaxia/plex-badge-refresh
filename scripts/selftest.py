@@ -32,10 +32,18 @@ def test_badge_rule():
     check('tag -UC', pc.tag_of('ABP-984-UC'), 'UC')
     check('tag -LTX', pc.tag_of('SSIS-724-LTX'), 'LTX')
     check('tag underscore', pc.tag_of('ABC_123_UC'), 'UC')
+    check('tag _LTX', pc.tag_of('ABP-321_LTX'), 'LTX')
+    check('tag __restored', pc.tag_of('ABP-321__restored'), 'RESTORED')
+    check('tag -restored', pc.tag_of('ABP-321-restored'), 'RESTORED')
+    check('tag _LTX__restored', pc.tag_of('ABP-321_LTX__restored'), 'RESTORED')
     check('no separator -> none', pc.tag_of('FSDSS983C'), None)
     check('plain', pc.tag_of('JUR-891'), None)
     check('expect UC', pc.expect_for('UC'), ('uc.png',))
     check('expect U allows uc', 'uc.png' in pc.expect_for('U'), True)
+    check('expect RESTORED is uncensored',
+          pc.expect_for('RESTORED'), ('u.png', 'uc.png'))
+    check('expect BASICVSR++ is uncensored',
+          pc.expect_for('BASICVSR++'), ('u.png', 'uc.png'))
 
 
 def test_paths():
@@ -114,6 +122,108 @@ def test_track_timeout(tmp):
     check('track times out cleanly', (done, sorted(pending)), (set(), ['9']))
 
 
+def test_rematch_codes():
+    guid = 'com.plexapp.agents.metatube://MGS:259LUXU-1826?lang=zh'
+    check('code from guid', pc.code_candidates(guid, '')[:1], ['259LUXU-1826'])
+    check('composite id, tail first',
+          pc.code_candidates('com.plexapp.agents.metatube://AVBASE:'
+                             'shoroutoclover%3ASTCV-066?lang=zh', '')[:2],
+          ['STCV-066', 'shoroutoclover:STCV-066'])
+    check('scene prefix stripped',
+          '200GANA-1600' in pc.code_candidates('', '/x/[456k.me]200GANA-1600.mp4'),
+          True)
+    check('quality suffix stripped',
+          '259LUXU-1040' in pc.code_candidates('', '/x/259LUXU-1040.FHD.mkv'),
+          True)
+    check('badge tag stripped',
+          'CRNX-231' in pc.code_candidates('', '/x/CRNX-231-U.mp4'), True)
+    check('norm_code ignores separators',
+          pc.norm_code('259luxu-1826') == pc.norm_code('259LUXU 1826'), True)
+    check('provider from guid',
+          pc.guid_provider('com.plexapp.agents.metatube://AVBASE:x?id=1'),
+          'avbase')
+
+
+def test_upstream_registry(tmp):
+    register = """
+import (
+	_ "github.com/metatube-community/metatube-sdk-go/provider/fanza"
+	_ "github.com/metatube-community/metatube-sdk-go/provider/caribbeancompr"
+	_ "github.com/metatube-community/metatube-sdk-go/provider/javbus"
+)
+"""
+    check('parse register.go imports',
+          pc.IMPORT_RE.findall(register),
+          ['fanza', 'caribbeancompr', 'javbus'])
+    source = 'const (\n\tName     = "KIN8"\n\tURL      = "https://x"\n)'
+    match = pc.NAME_RE.search(source)
+    check('parse Name const', match.group(1) if match else None, 'KIN8')
+
+    old = {'fanza': 'FANZA', 'kin8tengoku': 'KIN8', 'arzon': 'ARZON'}
+    new = {'fanza': 'FANZA', 'kin8tengoku': 'KIN8', 'fc2db': 'FC2DB',
+           'mgstage': 'MGS'}
+    change = pc.diff_providers(old, new)
+    check('diff added', change['added'], ['fc2db', 'mgstage'])
+    check('diff removed', change['removed'], ['arzon'])
+    check('diff renamed', change['renamed'], [])
+    check('diff rename detected',
+          pc.diff_providers({'jav321': 'JAV321'},
+                            {'jav321': 'JAV321-NEW'})['renamed'], ['jav321'])
+    check('diff ignores order', pc.diff_providers({'a': 'A'}, {'a': 'A'}),
+          {'added': [], 'removed': [], 'renamed': []})
+
+    view = pc.classify_providers(
+        ['FANZA', 'KIN8', 'Gfriends'], ['AVBASE', 'MadouQu'],
+        {'fanza', 'kin8', 'gfriends', 'javbus'})
+    check('classify missing', view['missing'], [])
+    check('classify experimental off', view['experimental_off'],
+          ['AVBASE', 'MadouQu'])
+    check('classify extra', view['extra'], ['javbus'])
+    check('classify provider case-insensitive',
+          pc.classify_providers(['FanZa'], [], {'fanza'})['missing'], [])
+
+    state = os.path.join(tmp, 'provider_state.json')
+    br._save_state(state, {'updated': '2026-11-07 05:20', 'sha': 'abc',
+                           'default': {'fanza': 'FANZA'}, 'experimental': {}})
+    loaded = br._load_state(state)
+    check('state roundtrip', loaded['default'], {'fanza': 'FANZA'})
+    check('missing state is None',
+          br._load_state(os.path.join(tmp, 'nope.json')), None)
+    check('state path next to config',
+          os.path.basename(br._state_path(
+              {'_config_file': os.path.join(tmp, 'config.json')}, None)),
+          'provider_state.json')
+
+
+def test_pick_with_cast():
+    cands = [{'provider': 'MGS', 'id': 'x1'},
+             {'provider': 'FANZA', 'id': 'x2'},
+             {'provider': 'JavBus', 'id': 'x3'}]
+    casts = {('MGS', 'x1'): [], ('FANZA', 'x2'): ['A', 'B'],
+             ('JavBus', 'x3'): ['C']}
+
+    def fake_info(_cfg, provider, ident):
+        return {'actors': casts.get((provider, ident), [])}
+
+    pick, cast = br.pick_with_cast(None, cands, info_fn=fake_info)
+    check('pick prefers a provider with cast', pick['provider'], 'FANZA')
+    check('pick reports the cast', cast, ['A', 'B'])
+
+    pick, cast = br.pick_with_cast(None, cands, prefer_actors=False)
+    check('no-prefer keeps provider order', pick['provider'], 'MGS')
+    check('no-prefer skips probing', cast, None)
+
+    pick, cast = br.pick_with_cast(None, cands, tries=1, info_fn=fake_info)
+    check('tries=1 keeps first', pick['provider'], 'MGS')
+    check('tries=1 cast empty', cast, [])
+
+    empty = [{'provider': 'MGS', 'id': 'none'}]
+    pick, cast = br.pick_with_cast(None, empty, info_fn=fake_info)
+    check('single candidate survives', pick['provider'], 'MGS')
+    check('single candidate no cast', cast, [])
+    check('empty candidate list', br.pick_with_cast(None, [])[0], None)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='plex-badge-')
     try:
@@ -122,6 +232,9 @@ def main():
         test_submissions(tmp)
         test_track(tmp)
         test_track_timeout(tmp)
+        test_rematch_codes()
+        test_upstream_registry(tmp)
+        test_pick_with_cast()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

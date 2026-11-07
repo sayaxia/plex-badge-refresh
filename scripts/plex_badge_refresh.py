@@ -12,6 +12,7 @@ Targets: --list FILE | --item KEY (repeatable) | --recent DAYS
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
@@ -288,6 +289,313 @@ def cmd_all(cfg, plex, args):
     return 1 if bad else 0
 
 
+# ------------------------------------------------------------------- rematch
+# When several providers carry the same code, prefer the one the badge work
+# already relies on: MGS and FANZA answer with a real poster most of the time,
+# aggregator sites (JavBus / JAV321) are slower and sometimes return 500.
+PROVIDER_ORDER = ['mgs', 'fanza', 'sod', 'faleno', 'dahlia', 'mywife', 'kin8',
+                  '1pondo', '10musume', 'heyzo', 'caribbeancom',
+                  'caribbeancompr', 'pacopacomama', 'muramura', 'tokyo-hot',
+                  'gcolle', 'pcolle', 'duga', 'getchu', 'ave', 'h0930',
+                  'h4610', 'c0930', 'heydouga', '10musume']
+
+
+def _prefer(result):
+    prov = (result.get('provider') or '').lower()
+    if prov in PROVIDER_ORDER:
+        return (PROVIDER_ORDER.index(prov), prov)
+    return (len(PROVIDER_ORDER), prov)
+
+
+def pick_with_cast(cfg, candidates, prefer_actors=True, tries=3,
+                   info_fn=None):
+    """Pick a candidate that still has actors when possible.
+
+    Rematching rewrites the cast from the new provider (the plug-in does
+    ``metadata.roles.clear()`` first), and several providers simply have no
+    actors for amateur titles. Picking by provider order alone therefore
+    wipes a cast the item already had; asking for the detail of the first few
+    candidates keeps it whenever some other source still knows the names.
+    """
+    if not candidates:
+        return None, None
+    first = candidates[0]
+    if not prefer_actors:
+        return first, None
+    info_fn = info_fn or pc.movie_info
+    first_actors = None
+    for pos, cand in enumerate(candidates[:tries]):
+        info = info_fn(cfg, cand.get('provider'), cand.get('id'))
+        actors = (info or {}).get('actors') or []
+        if pos == 0:
+            first_actors = actors
+        if actors:
+            return cand, actors
+    return first, first_actors or []
+
+
+def cmd_rematch(cfg, plex, args):
+    """Re-match items whose guid names a provider the server no longer has.
+
+    Such an item looks fine in Plex but every refresh dies immediately with
+    "404 provider not found"; Plex swallows the exception and keeps the old
+    metadata, so the item reads as "refresh finished instantly, nothing
+    changed".
+    """
+    valid = pc.server_providers(cfg)
+    out('server providers: %d' % len(valid))
+
+    index = plex.index(reload=args.reindex)
+    broken = {}
+    for rows in index.values():
+        for row in rows:
+            guid = row.get('guid') or ''
+            if cfg['agent'] not in guid:
+                continue
+            prov = pc.guid_provider(guid)
+            if not prov or prov in valid:
+                continue
+            broken.setdefault(row['key'], row)
+
+    targets = list(broken.values())
+    counts = {}
+    for row in targets:
+        prov = pc.guid_provider(row['guid'])
+        counts[prov] = counts.get(prov, 0) + 1
+    out('items pointing at a missing provider: %d' % len(targets))
+    for prov in sorted(counts, key=lambda p: -counts[p]):
+        out('   %-16s %d' % (prov, counts[prov]))
+    if args.item:
+        wanted = set(str(k) for k in args.item)
+        targets = [r for r in targets if r['key'] in wanted]
+    if args.limit:
+        targets = targets[:args.limit]
+    if not args.apply:
+        out('')
+        out('DRY RUN - add --apply to re-match (%d item(s)).' % len(targets))
+
+    fixed = failed = 0
+    no_cast = []
+    for pos, row in enumerate(targets, 1):
+        old_prov = pc.guid_provider(row['guid'])
+        name = (row.get('file') or '').replace('\\', '/').rsplit('/', 1)[-1]
+        pick = None
+        cast = None
+        code = ''
+        for cand in pc.code_candidates(row['guid'], row['file']):
+            exact = [r for r in pc.search_movies(cfg, cand)
+                     if pc.norm_code(r.get('id')) == pc.norm_code(cand)]
+            if exact:
+                pick, cast = pick_with_cast(
+                    cfg, sorted(exact, key=_prefer),
+                    prefer_actors=not args.no_prefer_actors,
+                    tries=args.cast_tries)
+                code = cand
+                break
+        if not pick:
+            failed += 1
+            out('[%3d/%3d] %-36s %-9s -> no result' % (pos, len(targets),
+                                                        name[:36], old_prov))
+            continue
+        prov = pick.get('provider') or ''
+        ident = pick.get('id') or ''
+        if args.apply:
+            guid = '%s://%s:%s?lang=zh' % (cfg['agent'], prov, ident)
+            plex.rematch(row['key'], guid, row.get('title') or code)
+        fixed += 1
+        if cast is None:
+            note = ''
+        elif cast:
+            note = '+%d 演员' % len(cast)
+        else:
+            note = '无演员数据'
+            no_cast.append('%s %s' % (name, prov))
+        out('[%3d/%3d] %-36s %-9s -> %-9s %-22s %s' % (
+            pos, len(targets), name[:36], old_prov, prov, ident[:22], note))
+
+    out('')
+    out('%s: %d re-matched, %d without a result'
+        % ('APPLIED' if args.apply else 'DRY RUN', fixed, failed))
+    if no_cast:
+        out('%d 条的新 provider 本身没有演员数据（Plex 原有演员会被清空）：'
+            % len(no_cast))
+        for line in no_cast:
+            out('   %s' % line)
+    if args.apply and fixed:
+        out('next: run "covers --apply" once the agent has written the posters')
+    return 1 if failed else 0
+
+
+# ----------------------------------------------------------------- providers
+def _state_path(cfg, override):
+    if override:
+        return override
+    cfg_file = cfg.get('_config_file') or os.path.join(pc.SKILL_DIR,
+                                                       'config.json')
+    return os.path.join(os.path.dirname(os.path.abspath(cfg_file)),
+                        'provider_state.json')
+
+
+def _load_state(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _save_state(path, state):
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2,
+                  sort_keys=True)
+        handle.write('\n')
+
+
+def broken_provider_counts(plex, cfg, index):
+    """guid provider -> number of items, for providers the server dropped."""
+    valid = pc.server_providers(cfg)
+    counts = {}
+    for rows in (index or {}).values():
+        for row in rows:
+            guid = row.get('guid') or ''
+            if cfg['agent'] not in guid:
+                continue
+            prov = pc.guid_provider(guid)
+            if not prov or prov in valid:
+                continue
+            counts[prov] = counts.get(prov, 0) + 1
+    return counts
+
+
+def cmd_providers(cfg, plex, args):
+    """Watch the upstream provider registry and what our server serves."""
+    token = args.github_token or os.environ.get('GITHUB_TOKEN')
+    repo, ref = args.upstream_repo, args.ref
+    try:
+        head = pc.upstream_head(repo, ref, token)
+        commits = pc.upstream_provider_commits(repo, ref, 8, token)
+        dirs_default, dirs_exp = pc.upstream_dirs(repo, ref, token)
+    except Exception as exc:
+        out('cannot read upstream %s@%s: %s' % (repo, ref, exc))
+        out('(GitHub API allows 60 anonymous calls/hour; '
+            'set GITHUB_TOKEN to raise it)')
+        return 2
+
+    names_default = pc.provider_names(dirs_default, repo, ref, token)
+    names_exp = pc.provider_names(dirs_exp, repo, ref, token)
+
+    state_path = _state_path(cfg, args.state)
+    old = _load_state(state_path)
+    old_default = (old or {}).get('default') or {}
+    old_exp = (old or {}).get('experimental') or {}
+    change = pc.diff_providers(old_default, names_default)
+    exp_change = pc.diff_providers(old_exp, names_exp)
+    changed = any(change.values()) or any(exp_change.values())
+
+    actor = set()
+    try:
+        server = sorted(pc.server_providers(cfg))
+        actor = pc.server_actor_providers(cfg)
+    except Exception as exc:
+        out('cannot read server providers: %s' % exc)
+        server = []
+    view = pc.classify_providers(list(names_default.values()),
+                                 list(names_exp.values()),
+                                 set(server) | actor)
+    plex_counts = {}
+    if args.plex and plex is not None:
+        plex_counts = broken_provider_counts(plex, cfg, plex.index())
+
+    if args.json:
+        payload = {
+            'upstream': {'repo': repo, 'ref': ref, 'head': head,
+                         'default': names_default,
+                         'experimental': names_exp,
+                         'commits': commits},
+            'change': change, 'experimental_change': exp_change,
+            'changed': changed,
+            'server': {'providers': server, 'view': view,
+                       'broken': plex_counts},
+            'state_file': state_path,
+        }
+        out(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        out('MetaTube 上游 provider 监控')
+        out('上游 %s@%s  %s (%s)' % (repo, ref, head['sha'][:7],
+                                    (head['date'] or '')[:10]))
+        out('  %s' % head['message'])
+        out('上游 provider：默认 %d / 实验 %d'
+            % (len(names_default), len(names_exp)))
+        out('')
+        out('上游最近的 provider 提交')
+        for row in commits[:6]:
+            out('  %s  %-10s %s' % (row['sha'], row['date'], row['message'][:70]))
+        out('')
+        if old is None:
+            out('首次运行：已把当前清单写成基线（%s）' % state_path)
+        else:
+            out('与上次快照对比（%s）'
+                % (old.get('updated') or '未知时间'))
+            if not changed:
+                out('  provider 集合无变化')
+            for directory in change['added']:
+                out('  + %-16s 默认池新增（目录 %s）→ 重建镜像即可支持'
+                    % (names_default[directory], directory))
+            for directory in change['removed']:
+                out('  - %-16s 已被上游移除 → 引用它的旧条目会 404，需 rematch'
+                    % old_default.get(directory, directory))
+            for directory in change['renamed']:
+                out('  ~ %-16s %s → %s（API 名称变了，旧 guid 会 404）'
+                    % (directory, old_default[directory],
+                       names_default[directory]))
+            for directory in exp_change['added']:
+                out('  + %-16s 实验池新增（%s）→ 需 -tags experimental 重建'
+                    % (names_exp[directory], directory))
+            for directory in exp_change['removed']:
+                out('  - %-16s 实验池移除' % old_exp.get(directory, directory))
+            if changed and head['sha'][:7] != (old.get('sha') or '')[:7]:
+                out('  上游 HEAD %s → %s'
+                    % ((old.get('sha') or '')[:7], head['sha'][:7]))
+        out('')
+        out('本机服务 provider：%d 个' % len(server))
+        if view['missing']:
+            out('  缺失上游默认 provider：%s' % '、'.join(view['missing']))
+        else:
+            out('  缺失上游默认 provider：无')
+        if view['experimental_off']:
+            out('  实验池未启用：%s（构建时 -tags experimental 才编入）'
+                % '、'.join(view['experimental_off']))
+        if view['experimental_on']:
+            out('  实验池已启用：%s' % '、'.join(view['experimental_on']))
+        if view['extra']:
+            out('  服务端多出的 provider：%s' % '、'.join(view['extra']))
+        if plex_counts or (args.plex and plex is not None):
+            out('')
+            out('Plex 侧失效 provider 条目')
+            if not plex_counts:
+                out('  无')
+            for prov in sorted(plex_counts, key=lambda p: -plex_counts[p]):
+                out('  %-16s %d' % (prov, plex_counts[prov]))
+            out('  修复：providers 只负责发现，动数据请用 rematch --apply')
+
+    if args.save_state or changed or old is None:
+        _save_state(state_path, {
+            'updated': time.strftime('%Y-%m-%d %H:%M'),
+            'upstream': '%s@%s' % (repo, ref),
+            'sha': head['sha'],
+            'default': names_default,
+            'experimental': names_exp,
+        })
+        if not args.json:
+            out('')
+            out('已更新基线：%s' % state_path)
+
+    if changed and args.fail_on_change:
+        return 1
+    return 0
+
+
 def main():
     setup_console()
     common = argparse.ArgumentParser(add_help=False)
@@ -304,7 +612,7 @@ def main():
     common.add_argument('--all-files', action='store_true',
                         help='include files without a badge suffix')
     common.add_argument('--tag-filter', metavar='TAG',
-                        help='only C / U / UC / LTX ...')
+                        help='only C / U / UC / LTX / RESTORED ...')
     common.add_argument('--reindex', action='store_true',
                         help='ignore the in-process Plex index')
 
@@ -328,6 +636,31 @@ def main():
     p = sub.add_parser('verify', parents=[common], help='check the result')
     p.set_defaults(func=cmd_verify)
 
+    p = sub.add_parser('providers', parents=[common],
+                       help='watch the upstream provider registry')
+    p.add_argument('--upstream-repo', default=pc.UPSTREAM_REPO)
+    p.add_argument('--ref', default=pc.UPSTREAM_REF)
+    p.add_argument('--state', help='snapshot file (default: next to config)')
+    p.add_argument('--plex', action='store_true',
+                   help='also count items stuck on a dropped provider')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--github-token', default='',
+                   help='default: $GITHUB_TOKEN')
+    p.add_argument('--save-state', action='store_true',
+                   help='rewrite the snapshot even without changes')
+    p.add_argument('--fail-on-change', action='store_true',
+                   help='exit 1 when the provider set changed')
+    p.set_defaults(func=cmd_providers)
+
+    p = sub.add_parser('rematch', parents=[common],
+                       help='re-match items whose provider no longer exists')
+    p.add_argument('--apply', action='store_true')
+    p.add_argument('--no-prefer-actors', action='store_true',
+                   help='pick by provider order even when that source has no cast')
+    p.add_argument('--cast-tries', type=int, default=3,
+                   help='candidates to probe for actors (default 3)')
+    p.set_defaults(func=cmd_rematch)
+
     p = sub.add_parser('all', parents=[common],
                        help='refresh + covers + verify')
     p.add_argument('--apply', action='store_true')
@@ -347,10 +680,14 @@ def main():
     try:
         plex = pc.Plex(cfg, token=getattr(args, 'token', None))
     except Exception as exc:
-        out('cannot talk to Plex: %s' % exc)
-        out('check plex_url / prefs_path in %s' % (cfg.get('_config_file')
-                                                   or 'config.json'))
-        return 2
+        if args.cmd == 'providers':
+            # provider watching only needs the MetaTube API, not Plex
+            plex = None
+        else:
+            out('cannot talk to Plex: %s' % exc)
+            out('check plex_url / prefs_path in %s'
+                % (cfg.get('_config_file') or 'config.json'))
+            return 2
     try:
         return args.func(cfg, plex, args)
     except pc.ConfigError as exc:

@@ -1,6 +1,6 @@
 ---
 name: plex-badge-refresh
-description: 刷新 Plex 中 MetaTube 刮削条目的元数据，并把重新合成的角标海报设为封面。当用户说「刷新元数据」「重新刮削」「重刮一下」「封面没更新」「海报还是旧的」「把新合成海报设成封面」「角标不对」「-C -U -UC -LTX 的视频批量处理」并涉及 Plex / MetaTube 时使用。也用于核对某批视频的封面角标是否与文件名后缀一致。
+description: 刷新 Plex 中 MetaTube 刮削条目的元数据，并把重新合成的角标海报设为封面。当用户说「刷新元数据」「重新刮削」「重刮一下」「封面没更新」「海报还是旧的」「把新合成海报设成封面」「角标不对」「-C -U -UC -LTX __restored -BasicVSR++ 的视频批量处理」并涉及 Plex / MetaTube 时使用。也用于核对某批视频的封面角标是否与文件名后缀一致。
 agent_created: true
 ---
 
@@ -17,6 +17,8 @@ agent_created: true
 | 「看看哪些能处理 / 会改哪些」 | `scan` |
 | 「只要换封面，别重刮」 | `covers --apply` |
 | 「检查一下角标对不对」 | `verify` |
+| 「刷新秒结束还是旧的」 | `providers --plex` 看 guid 里的 provider 还在不在 |
+| 「上游 provider 有变化吗」 | `providers` |
 
 ## 快速上手
 
@@ -25,7 +27,10 @@ agent_created: true
 python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_refresh.py" all --apply
 ```
 
-默认读 `config.json` 里的 `list_file`，只处理**文件名带角标后缀**的条目（`-C` `-U` `-UC` `-LTX` …）。
+默认读 `config.json` 里的 `list_file`，只处理**文件名带角标后缀**的条目：`-C` / `-CH`（中文字幕）、
+`-U` / `-UNCENSORED` / `-LTX` / `_LTX` / `__restored` / `-BasicVSR++`（**都是无码破解**，统一 `u.png`，
+带中文字幕则 `uc.png`）、`-UC`（中文无码）。这些无码后缀只是同一版别的不同拼写，
+`BADGE_EXPECT` 对它们的期望值完全相同。
 `--apply` 是安全闸：不加就只打印计划。
 
 ## 命令
@@ -48,6 +53,10 @@ python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge
 | `covers --apply` | 按日志里的最新提交，把对应海报设为封面 |
 | `verify` | 逐条核对「选中的海报 == 最新提交」且角标与后缀匹配，有问题返回 1 |
 | `all --apply` | refresh → covers → verify 全流程 |
+| `rematch --apply` | 给 guid 里的 provider 已消失的条目按番号重新匹配（优先选有演员的源） |
+| `providers` | 比对上游 `register.go` 与本机服务实际提供的 provider，发现增删改名 |
+
+`rematch` 会**优先选有演员数据的源**：插件写元数据时先 `roles.clear()`，换到一个素人片没有登记演员的源，原有演员就被清空了。默认会多查前 3 个候选的详情，挑演员非空的那个；`--no-prefer-actors` 恢复旧的「只按源优先级选」，`--cast-tries N` 调整探测数量。干跑输出的每一行末尾会标 `+N 演员` 或 `无演员数据`，结尾再汇总一份「会掉演员」的清单。
 
 先小样本试跑，确认无误再全量：
 
@@ -56,6 +65,29 @@ $S = "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\plex_badge_r
 python $S all --apply --limit 2      # 先 2 条
 python $S all --apply                # 再全量
 ```
+
+## 上游 provider 变化
+
+条目「刷新 5 毫秒就结束、元数据还是旧的」，十有八九是 guid 里的 provider 已经不存在：服务端返回 `404 provider not found`，Plex 吞掉异常继续用旧数据。
+
+```bash
+python $S providers              # 上游清单 vs 本机服务 vs 上次快照
+python $S providers --plex       # 附带统计 Plex 里挂在缺失 provider 上的条目数
+python $S providers --json       # 给自动化/CI 用
+```
+
+- 基线存在 `provider_state.json`（和 `config.json` 同目录，已 gitignore），首次运行自动写入。
+- `--fail-on-change`：provider 集合变了就以退出码 1 结束，方便定时任务判断。
+- `--upstream-repo` / `--ref` 可改看别的分支或自己的 fork；`GITHUB_TOKEN` 能提高 GitHub API 限额。
+
+两种变化及后果：
+
+| 变化 | 后果 | 怎么办 |
+|---|---|---|
+| 上游**新增** provider | 当前镜像没有，用不上 | 重建镜像（实验池需 `-tags experimental`） |
+| 上游**移除/改名** provider | 引用它的旧条目全部 404，刷新永远「秒结束」 | 无法恢复，只能 `rematch --apply` 换 provider |
+
+已知实例：`avbase` 属于**实验池**（`engine/register_exp.go`，默认构建不编入），`arzon` 已在 #250 被上游移除（2025-07）。
 
 ## 配置
 
@@ -113,7 +145,7 @@ tail -40 "//<plex-host>/Plex/Library/Application Support/Plex Media Server/Logs/
 
 - 整批 `no update`：插件没加载。查日志有没有 `SyntaxError` / `Exception starting plug-in`（Plex 的 RestrictedPython 禁止以下划线开头的标识符）。
 - 单条 `no update`：外部图源挂了（JAV321 偶发 500 EOF），日志里是 `Failed to download poster`，单独重试该条即可。
-- 文件名后缀没被识别：角标必须用 `-` 或 `_` 隔开，`FSDSS983C.mp4` 不算，要改成 `FSDSS-983-C.mp4`。
+- 文件名后缀没被识别：角标必须用 `-` / `_` / 空格隔开，连续多个也认，`FSDSS983C.mp4` 不算，要改成 `FSDSS-983-C.mp4`；`-UHD` 是分辨率不算无码。无码词元为 `U` / `UNCENSORED` / `LTX` / `RESTORED` / `BASICVSR` / `BASICVSR++`，全部期望 `u.png`（带字幕 `uc.png`）。
 
 ## 改代码之后
 
@@ -121,4 +153,4 @@ tail -40 "//<plex-host>/Plex/Library/Application Support/Plex Media Server/Logs/
 python "$env:USERPROFILE\.workbuddy\skills\plex-badge-refresh\scripts\selftest.py"
 ```
 
-离线自测（不碰 Plex、不碰 NAS），覆盖角标正则、路径换算、日志解析（含轮转优先级）、刷新跟踪的超时与完成判定。20 项全绿再上真机。
+离线自测（不碰 Plex、不碰 NAS），覆盖角标正则（含 `_LTX` / `__restored` / `-BasicVSR++` 归为无码破解、`FSDSS983C` 不算角标的负例）、路径换算、日志解析（含轮转优先级）、刷新跟踪的超时与完成判定、上游 provider 清单解析与差异判定。56 项全绿再上真机。

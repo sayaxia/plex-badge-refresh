@@ -10,16 +10,20 @@ import io
 import json
 import os
 import re
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_NAME = 'config.json'
 
 DEFAULTS = {
     'plex_url': 'http://127.0.0.1:32400',
+    'metatube_url': '',
     'prefs_path': '',
     'plugin_log': '',
     'agent': 'com.plexapp.agents.metatube',
@@ -32,8 +36,9 @@ DEFAULTS = {
 # The plug-in decides a badge from the file stem: the token has to follow a
 # separator, otherwise "FSDSS983C" is just part of the code. Keep this rule
 # identical to utils.py, or we would refresh files the agent cannot see.
-TAG_RE = re.compile(r'[-_\s](UNCENSORED|UC|C|CH|U|LTX|BASICVSR\+\+|BASICVSR)$',
-                    re.IGNORECASE)
+TAG_RE = re.compile(
+    r'[-_\s]+(UNCENSORED|UC|C|CH|U|LTX|RESTORED|BASICVSR\+\+|BASICVSR)$',
+    re.IGNORECASE)
 
 VIDEO_EXT = ('.mp4', '.mkv', '.avi', '.wmv', '.mov', '.m4v', '.ts', '.iso',
              '.mpg', '.mpeg', '.flv', '.webm', '.rmvb', '.strm')
@@ -47,6 +52,9 @@ BADGE_EXPECT = {
     'UNCENSORED': ('u.png', 'uc.png'),
     'UC': ('uc.png',),
     'LTX': ('u.png', 'uc.png'),
+    'RESTORED': ('u.png', 'uc.png'),
+    'BASICVSR': ('u.png', 'uc.png'),
+    'BASICVSR++': ('u.png', 'uc.png'),
 }
 BADGE_LABEL = {'zimu.png': '中文字幕', 'u.png': '无码破解', 'uc.png': '中文无码'}
 
@@ -430,7 +438,278 @@ def ident_of(guid):
     return match.group(1).lower() if match else None
 
 
+# ------------------------------------------------------- MetaTube server side
+def metatube_base(cfg):
+    """Server address; defaults to the Plex host on port 8080."""
+    base = (cfg.get('metatube_url') or '').rstrip('/')
+    if base:
+        return base
+    host = urllib.parse.urlsplit(cfg['plex_url']).hostname or '127.0.0.1'
+    return 'http://%s:8080' % host
+
+
+def _server_json(url):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(url, timeout=90).read()
+
+
+def server_providers(cfg):
+    """Providers the server actually serves, lower-cased.
+
+    A library matched by an older server build can point at a provider that
+    has since been dropped (avbase, arzon ...). Every refresh of such an item
+    dies in ~5 ms with "404 provider not found" and Plex silently keeps the
+    old metadata, which is why those items look like "refresh did nothing".
+    """
+    data = json.loads(_server_json(metatube_base(cfg) + '/v1/providers'))
+    return set(str(k).lower() for k in data['data']['movie_providers'])
+
+
+def server_actor_providers(cfg):
+    """Actor-only providers (Gfriends); they never serve movie ids."""
+    data = json.loads(_server_json(metatube_base(cfg) + '/v1/providers'))
+    return set(str(k).lower()
+               for k in data['data'].get('actor_providers') or {})
+
+
+def movie_info(cfg, provider, ident):
+    """Full detail for one provider/id, or {} when it cannot be read.
+
+    Search results carry no cast, so the only way to know whether a provider
+    would keep the actors is to ask for the detail.
+    """
+    url = '%s/v1/movies/%s/%s' % (metatube_base(cfg),
+                                  urllib.parse.quote(provider or ''),
+                                  urllib.parse.quote(ident or ''))
+    try:
+        return json.loads(_server_json(url)).get('data') or {}
+    except Exception:
+        return {}
+
+
+def search_movies(cfg, q):
+    """Search the server, retrying once.
+
+    The aggregator providers answer 500 / EOF now and then; a single empty
+    reply used to look like "this code does not exist anywhere", which put
+    perfectly resolvable items into the "manual match" bucket.
+    """
+    url = '%s/v1/movies/search?q=%s' % (metatube_base(cfg),
+                                        urllib.parse.quote(q or ''))
+    for attempt in range(2):
+        try:
+            data = json.loads(_server_json(url)).get('data') or []
+            if data:
+                return data
+        except Exception:
+            pass
+        if attempt == 0:
+            continue
+    return []
+
+
+def norm_code(text):
+    return re.sub(r'[^A-Z0-9]', '', (text or '').upper())
+
+
+CODE_RE = re.compile(r'([A-Za-z]{2,}[-_ ]?\d{2,})')
+NOISE_PREFIX_RE = re.compile(r'^[\[\({][^\]\)}]*[\]\)}]\s*')
+QUALITY_SUFFIX_RE = re.compile(r'(?i)[._\- ](fhd|hd|sd|4k|uhd|uncensored)\d*$')
+
+
+def code_candidates(guid, path):
+    """Codes to search for, best first.
+
+    The old guid can carry a composite id ("shoroutoclover:STCV-066"), so the
+    tail after the last colon is tried before the whole thing. The file name
+    is the fallback and usually the cleanest source, but scene names carry
+    tag noise ("[456k.me]200GANA-1600", "259LUXU-1040.FHD"), so every variant
+    is offered and the first one that finds an exact hit wins.
+    """
+    out = []
+    match = re.search(r'://[^:?]+:(.+?)(?:\?|$)', guid or '')
+    if match:
+        ident = urllib.parse.unquote(match.group(1))
+        if ':' in ident:
+            out.append(ident.split(':')[-1])
+        out.append(ident)
+
+    stem = os.path.splitext(os.path.basename(path or ''))[0]
+    stem = TAG_RE.sub('', stem).strip()
+    variants = [stem,
+                NOISE_PREFIX_RE.sub('', stem),
+                QUALITY_SUFFIX_RE.sub('', stem),
+                QUALITY_SUFFIX_RE.sub('', NOISE_PREFIX_RE.sub('', stem))]
+    for variant in variants:
+        if not variant:
+            continue
+        out.append(variant)
+        found = CODE_RE.search(variant)
+        if found:
+            out.append(found.group(1))
+
+    seen = []
+    for cand in out:
+        cand = (cand or '').strip()
+        if cand and cand not in seen:
+            seen.append(cand)
+    return seen
+
+
+def guid_provider(guid):
+    match = re.match(r'^[^:]+://([^:?]+):', guid or '')
+    return match.group(1).lower() if match else None
+
+
 def badge_label(badge):
     if not badge:
         return '-'
     return BADGE_LABEL.get(badge, badge)
+
+
+# ------------------------------------------------------- upstream registry
+UPSTREAM_REPO = 'metatube-community/metatube-sdk-go'
+UPSTREAM_REF = 'main'
+
+IMPORT_RE = re.compile(
+    r'_\s+"github\.com/metatube-community/metatube-sdk-go/provider/([^"]+)"')
+NAME_RE = re.compile(r'^\s*Name\s*=\s*"([^"]+)"', re.M)
+
+
+def http_text(url, token=None, timeout=30, retries=2):
+    """GET a URL as text without touching the system proxy.
+
+    The NAS is on a LAN, but this box may have a proxy configured that cannot
+    reach github.com; bypassing it is what makes the GitHub calls reliable.
+    """
+    headers = {'User-Agent': 'plex-badge-refresh'}
+    if token:
+        headers['Authorization'] = 'Bearer %s' % token
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    last = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            return opener.open(req, timeout=timeout).read().decode(
+                'utf-8', 'replace')
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code == 404:
+                raise
+            if exc.code in (403, 429):
+                # unauthenticated GitHub API: 60 req/h, secondary limits burst
+                if attempt < retries:
+                    time.sleep(2 + attempt * 3)
+                continue
+        except Exception as exc:  # noqa: BLE001 - network noise, retry
+            last = exc
+        if attempt < retries:
+            time.sleep(1 + attempt)
+    raise last
+
+
+def upstream_dirs(repo=UPSTREAM_REPO, ref=UPSTREAM_REF, token=None):
+    """Provider import list from engine/register.go (+ register_exp.go)."""
+    base = 'https://raw.githubusercontent.com/%s/%s/' % (repo, ref)
+    default = IMPORT_RE.findall(http_text(base + 'engine/register.go', token))
+    try:
+        experimental = IMPORT_RE.findall(
+            http_text(base + 'engine/register_exp.go', token))
+    except Exception:
+        experimental = []
+    return default, experimental
+
+
+def provider_names(dirs, repo=UPSTREAM_REPO, ref=UPSTREAM_REF, token=None):
+    """dir name -> registered provider name ("kin8tengoku" -> "KIN8").
+
+    Each provider declares ``Name = "..."`` in ``provider/<dir>/<dir>.go``.
+    The directory name is only a fallback, because it disagrees with the name
+    the API serves for a handful of providers (AVE, KIN8, MGS ...), which used
+    to look like "provider missing on the server".
+    """
+    base = 'https://raw.githubusercontent.com/%s/%s/provider/' % (repo, ref)
+
+    def one(directory):
+        for fname in (directory + '.go', 'provider.go'):
+            try:
+                text = http_text('%s%s/%s' % (base, directory, fname),
+                                 token, timeout=20, retries=1)
+            except Exception:
+                continue
+            match = NAME_RE.search(text)
+            if match:
+                return directory, match.group(1)
+        return directory, directory
+
+    if not dirs:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, dirs))
+
+
+def upstream_head(repo=UPSTREAM_REPO, ref=UPSTREAM_REF, token=None):
+    data = json.loads(http_text(
+        'https://api.github.com/repos/%s/commits/%s' % (repo, ref), token))
+    return {
+        'sha': data.get('sha') or '',
+        'date': ((data.get('commit') or {}).get('author') or {}).get('date')
+        or '',
+        'message': ((data.get('commit') or {}).get('message') or '')
+        .splitlines()[0] if data.get('commit') else '',
+    }
+
+
+def upstream_provider_commits(repo=UPSTREAM_REPO, ref=UPSTREAM_REF,
+                              limit=8, token=None):
+    url = ('https://api.github.com/repos/%s/commits?sha=%s&path=provider'
+           '&per_page=%d' % (repo, ref, limit))
+    rows = json.loads(http_text(url, token))
+    commits = []
+    for row in rows if isinstance(rows, list) else []:
+        commits.append({
+            'sha': (row.get('sha') or '')[:7],
+            'date': ((row.get('commit') or {}).get('author') or {})
+            .get('date', '')[:10],
+            'message': ((row.get('commit') or {}).get('message') or '')
+            .splitlines()[0],
+        })
+    return commits
+
+
+# --------------------------------------------------------- provider diffing
+def provider_key(name):
+    return (name or '').strip().lower()
+
+
+def diff_providers(old, new):
+    """Compare two {dir: name} maps; returns added/removed/renamed dicts."""
+    old = old or {}
+    new = new or {}
+    added = sorted(set(new) - set(old), key=provider_key)
+    removed = sorted(set(old) - set(new), key=provider_key)
+    renamed = sorted(d for d in set(old) & set(new) if old[d] != new[d])
+    return {'added': added, 'removed': removed, 'renamed': renamed}
+
+
+def classify_providers(default_names, experimental_names, server_names):
+    """Upstream registry vs what the server really serves.
+
+    ``*_names`` are display names (FANZA, KIN8 ...), ``server_names`` is the
+    lower-cased set the server serves, movie and actor providers alike: an
+    actor-only provider such as Gfriends is legitimately absent from
+    movie_providers and must not read as "missing".
+    """
+    server = set(provider_key(n) for n in server_names or ())
+    default = list(default_names or ())
+    experimental = list(experimental_names or ())
+    exp_keys = set(provider_key(n) for n in experimental)
+    default_keys = set(provider_key(n) for n in default)
+
+    missing = [n for n in default if provider_key(n) not in server]
+    exp_off = [n for n in experimental if provider_key(n) not in server]
+    exp_on = [n for n in experimental if provider_key(n) in server]
+    extra = sorted(n for n in server
+                   if n not in default_keys and n not in exp_keys)
+    return {'missing': missing, 'experimental_off': exp_off,
+            'experimental_on': exp_on, 'extra': extra}

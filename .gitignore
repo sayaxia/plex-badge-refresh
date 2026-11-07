@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# provider watch baseline: per machine, rewritten on every run
+provider_state.json
